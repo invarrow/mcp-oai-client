@@ -19,7 +19,8 @@ class MCPClient:
         self.exit_stack = AsyncExitStack()
         base_url="https://generativelanguage.googleapis.com/v1beta/openai/"
         self.client = OpenAI(api_key=os.getenv("GEMINI_API_KEY"),base_url=base_url)
-    # methods will go here
+        self.messages = []
+
     async def connect_to_server(self, server_script_path: str):
       """Connect to an MCP server
 
@@ -51,20 +52,13 @@ class MCPClient:
 
     async def process_query(self, query: str) -> str:
       """Process a query using Claude and available tools"""
-      messages = [
-          {
-              "role": "user",
-              "content": query
+      self.messages.append({
+          "role": "user",
+          "content": query
           }
-      ]
+      )
 
       response = await self.session.list_tools()
-      available_tools = [{
-          "name": tool.name,
-          "description": tool.description,
-          "input_schema": tool.inputSchema
-      } for tool in response.tools]
-
       tools = []
       for tool in response.tools:
         tools.append({
@@ -78,7 +72,7 @@ class MCPClient:
 
       response = self.client.chat.completions.create(
           model="gemini-2.5-pro-exp-03-25",
-          messages=messages,
+          messages=self.messages,
           tools=tools
       )
 
@@ -87,9 +81,7 @@ class MCPClient:
 
       assistant_message_content = []
       message = response.choices[0].message
-      #print(message)
-      #print(message.content)
-      print(message.tool_calls if message.tool_calls is not None else "No tool calls")
+      print(message)
       if message.content is not None:
           final_text.append(message.content)
           assistant_message_content.append(message)
@@ -108,30 +100,27 @@ class MCPClient:
           final_text.append(f"[Calling tool {tool_name} with args {tool_args}]")
 
           assistant_message_content.append(message)
-          messages.append({
+          self.messages.append({
               "role": "assistant",
-              "content": assistant_message_content
+              "content": str(tool)
           })
-          messages.append(
-              {
-              "role": "user",
-              "content": [
+          if result.content is not None and result is not None:
+              self.messages.append(
                   {
-                      "type": "tool_result",
-                      "content": result.content
-                  }
-              ]
-          })
+                  "role": "assistant",
+                  "content": str(result.content[0].text)
+              }
+                  )
 
           response = self.client.chat.completions.create(
               model="gemini-2.5-pro-exp-03-25",
-              messages=messages,
+              messages=self.messages,
               tools=tools
           )
-
-          final_text.append(response.choices[0].message.content)
+          if response.choices: final_text.append(response.choices[0].message.content)
 
       return "\n".join(final_text)
+
     async def chat_loop(self):
         """Run an interactive chat loop"""
         print("\nMCP Client Started!")
