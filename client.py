@@ -8,47 +8,42 @@ from openai import OpenAI
 
 from dotenv import load_dotenv
 import os
+import json
 
 load_dotenv()  # load environment variables from .env
 
 
 class MCPClient:
-    def __init__(self):
+    def __init__(self, config_file="mcp_config.json"):
         # Initialize session and client objects
         self.session: Optional[ClientSession] = None
         self.exit_stack = AsyncExitStack()
-        base_url="https://generativelanguage.googleapis.com/v1beta/openai/"
-        self.client = OpenAI(api_key=os.getenv("GEMINI_API_KEY"),base_url=base_url)
+        base_url = "https://generativelanguage.googleapis.com/v1beta/openai/"
+        self.client = OpenAI(api_key=os.getenv("GEMINI_API_KEY"), base_url=base_url)
+        self.model="gemini-2.0-flash"
         self.messages = []
+        with open(config_file, 'r') as f:
+            config = json.load(f)
+        self.mcp_servers = config.get("mcpServers", {})
 
-    async def connect_to_server(self, server_script_path: str):
-      """Connect to an MCP server
+    async def connect_to_server(self, server_name: str):
+        if server_name not in self.mcp_servers:
+            raise ValueError(f"Server '{server_name}' not found in config.")
 
-      Args:
-          server_script_path: Path to the server script (.py or .js)
-      """
-      is_python = server_script_path.endswith('.py')
-      is_js = server_script_path.endswith('.js')
-      if not (is_python or is_js):
-          raise ValueError("Server script must be a .py or .js file")
+        server_config = self.mcp_servers[server_name]
+        command = server_config.get("command")
+        args = server_config.get("args", [])
+        env = server_config.get("env", {})
 
-      command = "python" if is_python else "node"
-      server_params = StdioServerParameters(
-          command=command,
-          args=[server_script_path],
-          env=None
-      )
+        server_params = StdioServerParameters(command=command, args=args, env=env)
+        stdio_transport = await self.exit_stack.enter_async_context(stdio_client(server_params))
+        self.stdio, self.write = stdio_transport
+        self.session = await self.exit_stack.enter_async_context(ClientSession(self.stdio, self.write))
+        await self.session.initialize()
 
-      stdio_transport = await self.exit_stack.enter_async_context(stdio_client(server_params))
-      self.stdio, self.write = stdio_transport
-      self.session = await self.exit_stack.enter_async_context(ClientSession(self.stdio, self.write))
-
-      await self.session.initialize()
-
-      # List available tools
-      response = await self.session.list_tools()
-      tools = response.tools
-      print("\nConnected to server with tools:", [tool.name for tool in tools])
+        response = await self.session.list_tools()
+        tools = response.tools
+        print("\nConnected to server with tools:", [tool.name for tool in tools])
 
     async def process_query(self, query: str) -> str:
       """Process a query using Claude and available tools"""
@@ -60,7 +55,8 @@ class MCPClient:
 
       response = await self.session.list_tools()
       tools = []
-      for tool in response.tools:
+      for i,tool in enumerate(response.tools):
+        if i==2:continue
         tools.append({
             "type": "function",
             "function": {
@@ -71,7 +67,7 @@ class MCPClient:
         })
 
       response = self.client.chat.completions.create(
-          model="gemini-2.5-pro-exp-03-25",
+          model=self.model,
           messages=self.messages,
           tools=tools
       )
@@ -79,12 +75,9 @@ class MCPClient:
       # Process response and handle tool calls
       final_text = []
 
-      assistant_message_content = []
       message = response.choices[0].message
-      print(message)
       if message.content is not None:
           final_text.append(message.content)
-          assistant_message_content.append(message)
       import json
       from typing import Any
       if message.tool_calls is not None:
@@ -95,29 +88,25 @@ class MCPClient:
 
           # Execute tool call
           if tool_name is not None and tool_args is not None and self.session is not None:
+            final_text.append(f"[Calling tool {tool_name} with args {tool_args}]")
             result = await self.session.call_tool(tool_name, tool_args)
-            print("Assistant: ", result.content[0].text)
-          final_text.append(f"[Calling tool {tool_name} with args {tool_args}]")
-
-          assistant_message_content.append(message)
-          self.messages.append({
-              "role": "assistant",
-              "content": str(tool)
-          })
-          if result.content is not None and result is not None:
-              self.messages.append(
-                  {
-                  "role": "assistant",
-                  "content": str(result.content[0].text)
-              }
-                  )
-
+            print("Tool : ", result.content[0])
+            self.messages.append({
+                "role": "assistant",
+                "content": f"Data returned from tool call {tool_name} with args {tool_args}\n"+str(result.content[0])
+            })
+            self.messages.append({"role": "user","content": "Explain the above data from the tool call {tool_name} with args {tool_args} based on the {query}"})
           response = self.client.chat.completions.create(
-              model="gemini-2.5-pro-exp-03-25",
+              model=self.model,
               messages=self.messages,
               tools=tools
           )
-          if response.choices: final_text.append(response.choices[0].message.content)
+          try:
+            if response.choices: final_text.append(response.choices[0].message.content)
+            print("Assistant: ",response.choices[0])
+          except Exception as e:
+            print("Error: ", e)
+
 
       return "\n".join(final_text)
 
@@ -137,7 +126,7 @@ class MCPClient:
                 print("\n" + response)
 
             except Exception as e:
-                print(f"\nError: {str(e)}")
+                print(f"\nErrorr: {str(e)}")
 
     async def cleanup(self):
         """Clean up resources"""
